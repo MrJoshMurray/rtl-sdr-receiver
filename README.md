@@ -6,7 +6,7 @@ Tune from 0.1 MHz to about 1.7 GHz: broadcast FM, AM and shortwave, airband, mil
 
 Plug the dongle into the USB-A port and connect an antenna. The package installs a udev rule so no root is needed.
 
-In FMW, small tuning changes use digital tuning within the current capture window. The
+Small tuning changes use digital tuning within the current capture window. In FMW, the
 waterfall's unavailable outer edge is blank until the hardware tuner recenters.
 
 ## Keys

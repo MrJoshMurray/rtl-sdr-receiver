@@ -7,11 +7,11 @@
 #include "rtl_receiver.h"
 
 #include "capture_queue.h"
+#include "digital_tuning.h"
 #include "iq_types.h"
 #include "radio_settings_adapter.h"
 #include "receive_audio_pipeline.h"
 #include "spectrum_simulator.h"
-#include "wfm_tuning.h"
 
 #include <liquid/liquid.h>
 
@@ -34,7 +34,6 @@ namespace {
 
 constexpr uint32_t kCaptureRateHz = 960000;
 constexpr uint32_t kMidRateHz = 240000;
-constexpr int kTunerOffsetHz = 200000;
 constexpr uint64_t kTunerMinHz = 24000000;
 constexpr size_t kMaxWriteFrames = 4096;
 constexpr size_t kReadBytes = 16384;
@@ -204,10 +203,10 @@ void RtlReceiver::run() {
             const int rit = rit_hz_.load();
             const auto mode = static_cast<model::RadioMode>(mode_.load());
             const bool direct = frequency_hz < kTunerMinHz;
-            const int offset = (direct || mode == model::RadioMode::Wfm) ? 0 : kTunerOffsetHz;
+            const int offset = (direct || mode == model::RadioMode::Wfm) ? 0 : kNarrowTunerOffsetHz;
             const uint64_t target = frequency_hz + rit;
-            const bool digital_tune = mode == model::RadioMode::Wfm && !direct
-                && wfm_digital_offset(target, capture_target, capture_direct, capture_offset).has_value();
+            const bool digital_tune = digital_tuning_offset(
+                target, capture_target, capture_direct, capture_offset, direct, offset).has_value();
             if (!digital_tune
                 && (target != capture_target || offset != capture_offset || direct != capture_direct)) {
                 {
@@ -279,13 +278,14 @@ void RtlReceiver::run() {
             tuned_generation = chunk.generation;
             settle_chunks = 2;
         }
-        int effective_offset = chunk.offset_hz;
-        if (mode == model::RadioMode::Wfm) {
-            const uint64_t target = frequency_hz_.load() + rit_hz_.load();
-            const auto digital_offset = wfm_digital_offset(target, chunk.target_hz,
-                                                            chunk.direct, chunk.offset_hz);
-            if (digital_offset) effective_offset = *digital_offset;
-        }
+        int effective_offset = -chunk.offset_hz;
+        const uint64_t frequency_hz = frequency_hz_.load();
+        const bool direct = frequency_hz < kTunerMinHz;
+        const uint64_t target = frequency_hz + rit_hz_.load();
+        const int desired_offset = (direct || mode == model::RadioMode::Wfm) ? 0 : kNarrowTunerOffsetHz;
+        const auto digital_offset = digital_tuning_offset(target, chunk.target_hz,
+            chunk.direct, chunk.offset_hz, direct, desired_offset);
+        if (digital_offset) effective_offset = *digital_offset;
         if (chunk.target_hz != tuned_hz || effective_offset != tuned_offset
             || chunk.direct != tuned_direct) {
             nco_crcf_set_frequency(shifter, 2.0f * kPi * static_cast<float>(effective_offset) / kCaptureRateHz);
@@ -323,7 +323,12 @@ void RtlReceiver::run() {
             spectrum_iq[i] = {static_cast<int32_t>(view_src[i].real * 8388607.0f),
                               static_cast<int32_t>(view_src[i].imag * 8388607.0f)};
         }
-        if (!settling) LiveSpectrumBuffer::push_iq(spectrum_iq.data(), view_count, wfm ? tuned_offset : 0);
+        if (!settling) {
+            const auto spectrum_center = static_cast<uint64_t>(
+                static_cast<int64_t>(chunk.target_hz) + chunk.offset_hz + tuned_offset);
+            LiveSpectrumBuffer::push_iq(spectrum_iq.data(), view_count, wfm ? tuned_offset : 0,
+                                        spectrum_center, chunk.generation);
+        }
 
         unsigned produced = 0;
         auto& channel = wfm ? wide_iq : narrow_iq;

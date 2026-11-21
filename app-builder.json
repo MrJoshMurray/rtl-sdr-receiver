@@ -1,7 +1,7 @@
 {
   "app_name": "RTL SDR",
   "package_name": "rtl-sdr-receiver",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Receive-only radio for Cardputer Zero using an RTL-SDR USB dongle.",
   "store": {
     "summary": "Listen to FM, airband, shortwave and ham radio with an RTL-SDR dongle.",

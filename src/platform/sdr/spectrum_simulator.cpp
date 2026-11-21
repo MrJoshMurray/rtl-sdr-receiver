@@ -29,6 +29,10 @@ std::array<IqSample, kLiveSpectrumSamples> live_iq_buffer{};
 size_t live_iq_count = 0;
 size_t live_iq_write_index = 0;
 int32_t live_iq_shift_hz = 0;
+uint64_t live_iq_center_hz = 0;
+uint64_t live_iq_generation = 0;
+uint32_t live_iq_span_hz = kDefaultRxSampleRateHz;
+bool live_spectrum_frame_valid = false;
 
 struct SpectrumFft {
     std::array<liquid_float_complex, kLiveSpectrumSamples> input{};
@@ -83,13 +87,23 @@ SpectrumFrame make_simulated_spectrum(uint32_t frame_index) noexcept {
     return spectrum;
 }
 
-void LiveSpectrumBuffer::push_iq(const IqSample* samples, size_t sample_count, int32_t shift_hz) noexcept {
+void LiveSpectrumBuffer::push_iq(const IqSample* samples, size_t sample_count, int32_t shift_hz,
+                                uint64_t center_hz, uint64_t generation) noexcept {
     if (!samples || sample_count == 0) {
         return;
     }
 
     std::lock_guard<std::mutex> lock(live_spectrum_mutex);
+    const uint32_t span_hz = live_spectrum_span.load();
+    if (center_hz != live_iq_center_hz || generation != live_iq_generation
+        || shift_hz != live_iq_shift_hz || span_hz != live_iq_span_hz) {
+        live_iq_count = 0;
+        live_iq_write_index = 0;
+    }
     live_iq_shift_hz = shift_hz;
+    live_iq_center_hz = center_hz;
+    live_iq_generation = generation;
+    live_iq_span_hz = span_hz;
     for (size_t sample = 0; sample < sample_count; ++sample) {
         live_iq_buffer[live_iq_write_index] = samples[sample];
         live_iq_write_index = (live_iq_write_index + 1) % kLiveSpectrumSamples;
@@ -118,14 +132,21 @@ bool LiveSpectrumBuffer::snapshot(SpectrumFrame& frame) noexcept {
     }
     std::array<IqSample, kLiveSpectrumSamples> samples{};
     int32_t shift_hz = 0;
+    uint64_t center_hz = 0;
+    uint64_t generation = 0;
+    uint32_t span_hz = 0;
     {
         std::lock_guard<std::mutex> lock(live_spectrum_mutex);
         if (live_iq_count < kLiveSpectrumSamples) {
-            return false;
+            if (live_spectrum_frame_valid) frame = live_spectrum_frame;
+            return live_spectrum_frame_valid;
         }
 
         const size_t first_sample = live_iq_write_index;
         shift_hz = live_iq_shift_hz;
+        center_hz = live_iq_center_hz;
+        generation = live_iq_generation;
+        span_hz = live_iq_span_hz;
         for (size_t sample = 0; sample < kLiveSpectrumSamples; ++sample) {
             samples[sample] = live_iq_buffer[
                 (first_sample + sample) % kLiveSpectrumSamples];
@@ -156,6 +177,18 @@ bool LiveSpectrumBuffer::snapshot(SpectrumFrame& frame) noexcept {
         std::fprintf(stderr, "Spectrum FFT failed\n");
         return false;
     }
+    static int32_t previous_shift_hz = 0;
+    static uint64_t previous_center_hz = 0;
+    static uint64_t previous_generation = 0;
+    static uint32_t previous_span_hz = 0;
+    if (shift_hz != previous_shift_hz || center_hz != previous_center_hz
+        || generation != previous_generation || span_hz != previous_span_hz) {
+        live_spectrum_power.fill(0.0f);
+        previous_shift_hz = shift_hz;
+        previous_center_hz = center_hz;
+        previous_generation = generation;
+        previous_span_hz = span_hz;
+    }
     for (size_t bin = 0; bin < kSpectrumBinCount; ++bin) {
         const size_t fft_bin = ((bin * kLiveSpectrumSamples + kSpectrumBinCount / 2)
                                 / kSpectrumBinCount + kLiveSpectrumSamples / 2)
@@ -170,7 +203,7 @@ bool LiveSpectrumBuffer::snapshot(SpectrumFrame& frame) noexcept {
     std::array<bool, kSpectrumBinCount> valid{};
     std::array<float, kSpectrumBinCount> sorted{};
     size_t valid_count = 0;
-    const int64_t span = live_spectrum_span.load();
+    const int64_t span = span_hz;
     const int64_t half_span_scaled = span * static_cast<int64_t>(kSpectrumBinCount);
     for (size_t bin = 0; bin < next.size(); ++bin) {
         const int64_t frequency_scaled = (2 * static_cast<int64_t>(bin)
@@ -196,6 +229,7 @@ bool LiveSpectrumBuffer::snapshot(SpectrumFrame& frame) noexcept {
         next[bin] = static_cast<uint8_t>(scaled);
     }
     live_spectrum_frame = next;
+    live_spectrum_frame_valid = true;
     frame = live_spectrum_frame;
     return true;
 }

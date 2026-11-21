@@ -8,7 +8,7 @@
 #include "sdr/receive_audio_pipeline.h"
 #include "sdr/capture_queue.h"
 #include "sdr/spectrum_simulator.h"
-#include "sdr/wfm_tuning.h"
+#include "sdr/digital_tuning.h"
 
 #include <algorithm>
 #include <cassert>
@@ -256,22 +256,81 @@ void test_live_spectrum_display_bins() {
     }
 }
 
-void test_wfm_digital_tuning() {
-    using platform::sdr::wfm_digital_offset;
-    constexpr uint64_t center = 98000000;
-    assert(wfm_digital_offset(center, center, false, 0) == 0);
-    assert(wfm_digital_offset(center + 200000, center, false, 0) == 200000);
-    assert(wfm_digital_offset(center - 200000, center, false, 0) == -200000);
-    assert(!wfm_digital_offset(center + 200001, center, false, 0));
-    assert(!wfm_digital_offset(center - 200001, center, false, 0));
-    assert(!wfm_digital_offset(center, 0, false, 0));
-    assert(!wfm_digital_offset(center, center, true, 0));
-    assert(!wfm_digital_offset(center, center, false, 200000));
+void test_spectrum_retune_history() {
+    std::vector<platform::sdr::IqSample> iq(2048);
+    platform::sdr::SpectrumFrame frame{};
+    platform::sdr::LiveSpectrumBuffer::set_span_hz(240000);
+    platform::sdr::LiveSpectrumBuffer::set_blanked(true);
+    assert(platform::sdr::LiveSpectrumBuffer::snapshot(frame));
+    platform::sdr::LiveSpectrumBuffer::set_blanked(false);
+    const auto fill_tone = [&](int bin) {
+        uint32_t random = 1;
+        const auto noise = [&] {
+            random = random * 1664525u + 1013904223u;
+            return (static_cast<float>(random >> 8) / 16777216.0f - 0.5f) * 0.02f;
+        };
+        for (size_t sample = 0; sample < iq.size(); ++sample) {
+            const float phase = 2.0f * kPi * (static_cast<float>(bin) / 288 - 0.5f) * sample;
+            iq[sample] = {quantize(0.15f * std::cos(phase) + noise()),
+                          quantize(0.15f * std::sin(phase) + noise())};
+        }
+    };
+    fill_tone(80);
+    platform::sdr::LiveSpectrumBuffer::push_iq(iq.data(), iq.size(), 0, 121000000, 1);
+    for (int i = 0; i < 40; ++i) assert(platform::sdr::LiveSpectrumBuffer::snapshot(frame));
+    assert(frame[80] > 100);
+    fill_tone(200);
+    const auto previous_frame = frame;
+    platform::sdr::LiveSpectrumBuffer::push_iq(iq.data(), iq.size() / 2, 0, 121100000, 1);
+    assert(platform::sdr::LiveSpectrumBuffer::snapshot(frame));
+    assert(frame == previous_frame);
+    platform::sdr::LiveSpectrumBuffer::push_iq(iq.data() + iq.size() / 2, iq.size() / 2,
+                                                0, 121100000, 1);
+    assert(platform::sdr::LiveSpectrumBuffer::snapshot(frame));
+    assert(frame[200] > 100);
+    assert(frame[80] < frame[200] / 2);
+    const auto new_frame = frame;
+    platform::sdr::LiveSpectrumBuffer::push_iq(iq.data(), iq.size() / 2, 0, 121100000, 2);
+    assert(platform::sdr::LiveSpectrumBuffer::snapshot(frame));
+    assert(frame == new_frame);
+    for (size_t sample = 0; sample < iq.size(); ++sample) {
+        const float phase1 = 2.0f * kPi * (80.0f / 288 - 0.5f) * sample;
+        const float phase2 = 2.0f * kPi * (200.0f / 288 - 0.5f) * sample;
+        iq[sample] = {quantize(0.15f * (std::cos(phase1) + std::cos(phase2))),
+                      quantize(0.15f * (std::sin(phase1) + std::sin(phase2)))};
+    }
+    platform::sdr::LiveSpectrumBuffer::push_iq(iq.data(), iq.size(), 0, 121100000, 2);
+    assert(platform::sdr::LiveSpectrumBuffer::snapshot(frame));
+    assert(frame[80] > 100 && frame[200] > 100);
+}
 
-    for (const int offset : {-200000, -10, 10, 200000}) {
+void test_digital_tuning() {
+    using platform::sdr::digital_tuning_offset;
+    constexpr uint64_t center = 98000000;
+    assert(digital_tuning_offset(center, center, false, 0, false, 0) == 0);
+    assert(digital_tuning_offset(center + 200000, center, false, 0, false, 0) == 200000);
+    assert(digital_tuning_offset(center - 200000, center, false, 0, false, 0) == -200000);
+    assert(!digital_tuning_offset(center + 200001, center, false, 0, false, 0));
+    assert(!digital_tuning_offset(center - 200001, center, false, 0, false, 0));
+    assert(!digital_tuning_offset(center, 0, false, 0, false, 0));
+    assert(!digital_tuning_offset(center, center, true, 0, false, 0));
+    assert(!digital_tuning_offset(center, center, false, 200000, false, 0));
+    assert(digital_tuning_offset(center + 200000, center, true, 0, true, 0) == 200000);
+    assert(!digital_tuning_offset(center + 200001, center, true, 0, true, 0));
+    assert(digital_tuning_offset(center, center, false, 200000, false, 200000) == -200000);
+    assert(digital_tuning_offset(center + 100000, center, false, 200000, false, 200000) == -100000);
+    assert(digital_tuning_offset(center - 100000, center, false, 200000, false, 200000) == -300000);
+    assert(!digital_tuning_offset(center + 100001, center, false, 200000, false, 200000));
+    assert(!digital_tuning_offset(center - 100001, center, false, 200000, false, 200000));
+    assert(!digital_tuning_offset(center, center, false, 200000, true, 0));
+
+    for (const int offset : {-300000, -200000, -100000, -10, 10, 200000}) {
         auto nco = nco_crcf_create(LIQUID_NCO);
         assert(nco);
-        const auto actual = wfm_digital_offset(center + offset, center, false, 0);
+        const bool narrow = offset == -300000 || offset == -100000;
+        const uint64_t target = center + offset + (narrow ? 200000 : 0);
+        const auto actual = digital_tuning_offset(target, center, false, narrow ? 200000 : 0,
+                                                   false, narrow ? 200000 : 0);
         assert(actual && *actual == offset);
         assert(nco_crcf_set_frequency(nco, 2.0f * kPi * *actual / 960000.0f) == LIQUID_OK);
         std::vector<liquid_float_complex> input(4096);
@@ -427,7 +486,8 @@ int main() {
     test_sideband_selection();
     test_live_spectrum_tones();
     test_live_spectrum_display_bins();
-    test_wfm_digital_tuning();
+    test_spectrum_retune_history();
+    test_digital_tuning();
     test_shifted_spectrum_edges();
     test_retune_capture_queue();
     test_retune_audio_fade();
