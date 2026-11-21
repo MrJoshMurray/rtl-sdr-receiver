@@ -111,7 +111,7 @@ private:
     bool dark_mode_ = true;
     AppPage current_page_ = AppPage::Apple;
     RadioMode radio_mode_ = RadioMode::Wfm;
-    uint8_t tuning_step_index_{9};
+    uint8_t tuning_step_index_{10};
     uint64_t frequency_hz_{98000000};
     uint32_t filter_bandwidth_hz_{180000};
     RadioMeasurements radio_measurements_{};

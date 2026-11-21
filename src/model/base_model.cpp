@@ -80,8 +80,8 @@ constexpr std::array<Band, 33> kBands = {{
     {"23cm", 1240000000, 1300000000, 1296200000, RadioMode::Nfm},
 }};
 
-constexpr std::array<uint32_t, 11> kTuningStepsHz = {
-    10, 100, 500, 1000, 5000, 9000, 10000, 12500, 25000, 100000, 200000,
+constexpr std::array<uint32_t, 12> kTuningStepsHz = {
+    10, 100, 500, 1000, 5000, 8333, 9000, 10000, 12500, 25000, 100000, 200000,
 };
 
 constexpr std::array<uint32_t, 6> kSsbBandwidthsHz = {
