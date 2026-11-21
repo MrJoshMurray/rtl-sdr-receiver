@@ -6,10 +6,12 @@
 
 #include "rtl_receiver.h"
 
+#include "capture_queue.h"
 #include "iq_types.h"
 #include "radio_settings_adapter.h"
 #include "receive_audio_pipeline.h"
 #include "spectrum_simulator.h"
+#include "wfm_tuning.h"
 
 #include <liquid/liquid.h>
 
@@ -21,7 +23,7 @@
 #include <cmath>
 #include <complex>
 #include <condition_variable>
-#include <deque>
+#include <cstdio>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -169,6 +171,7 @@ void RtlReceiver::run() {
     uint64_t tuned_hz = 0;
     int tuned_offset = 0;
     bool tuned_direct = false;
+    uint64_t tuned_generation = 0;
     int last_mode = -1;
     uint32_t last_bw = 0;
     size_t fade_in = 0;
@@ -186,13 +189,46 @@ void RtlReceiver::run() {
     // worker processes, otherwise the dongle overruns and audio underruns.
     std::mutex chunk_mutex;
     std::condition_variable chunk_cv;
-    std::deque<std::vector<uint8_t>> chunks;
+    CaptureQueue chunks;
     std::atomic<bool> reader_stop{false};
     std::atomic<bool> reader_failed{false};
     std::thread reader([&] {
         std::vector<uint8_t> buf(kReadBytes);
         int read_failures = 0;
+        uint64_t capture_target = 0;
+        int capture_offset = 0;
+        bool capture_direct = false;
+        uint64_t capture_generation = 0;
         while (!reader_stop.load()) {
+            const uint64_t frequency_hz = frequency_hz_.load();
+            const int rit = rit_hz_.load();
+            const auto mode = static_cast<model::RadioMode>(mode_.load());
+            const bool direct = frequency_hz < kTunerMinHz;
+            const int offset = (direct || mode == model::RadioMode::Wfm) ? 0 : kTunerOffsetHz;
+            const uint64_t target = frequency_hz + rit;
+            const bool digital_tune = mode == model::RadioMode::Wfm && !direct
+                && wfm_digital_offset(target, capture_target, capture_direct, capture_offset).has_value();
+            if (!digital_tune
+                && (target != capture_target || offset != capture_offset || direct != capture_direct)) {
+                {
+                    // Retained old samples can feed audio while the tuner is changing.
+                    std::lock_guard<std::mutex> lock(chunk_mutex);
+                    chunks.retune(capture_target != 0 && offset == capture_offset
+                                  && direct == capture_direct);
+                    capture_generation = chunks.generation();
+                }
+                if (direct != capture_direct && api.set_direct_sampling(dev, direct ? 2 : 0) != 0) {
+                    std::fprintf(stderr, "RTL-SDR direct sampling change failed\n");
+                    break;
+                }
+                if (api.set_center_freq(dev, static_cast<uint32_t>(target + offset)) != 0) {
+                    std::fprintf(stderr, "RTL-SDR frequency change failed\n");
+                    break;
+                }
+                capture_target = target;
+                capture_offset = offset;
+                capture_direct = direct;
+            }
             int got = 0;
             if (api.read_sync(dev, buf.data(), static_cast<int>(buf.size()), &got) != 0 || got <= 0) {
                 if (++read_failures > 20) break;
@@ -201,7 +237,8 @@ void RtlReceiver::run() {
             read_failures = 0;
             {
                 std::lock_guard<std::mutex> lock(chunk_mutex);
-                if (chunks.size() < 64) chunks.emplace_back(buf.begin(), buf.begin() + got);
+                chunks.push(buf.data(), static_cast<size_t>(got), capture_generation,
+                            capture_target, capture_offset, capture_direct);
             }
             chunk_cv.notify_one();
         }
@@ -210,31 +247,8 @@ void RtlReceiver::run() {
     });
 
     while (running_.load()) {
-        const uint64_t frequency_hz = frequency_hz_.load();
-        const int rit = rit_hz_.load();
         const auto mode = static_cast<model::RadioMode>(mode_.load());
         const uint32_t bandwidth = bandwidth_hz_.load();
-        const bool direct = frequency_hz < kTunerMinHz;
-        const int offset = (direct || mode == model::RadioMode::Wfm) ? 0 : kTunerOffsetHz;
-        const uint64_t target = frequency_hz + rit;
-
-        if (target != tuned_hz || offset != tuned_offset || direct != tuned_direct) {
-            if (direct != tuned_direct) api.set_direct_sampling(dev, direct ? 2 : 0);
-            api.set_center_freq(dev, static_cast<uint32_t>(target + offset));
-            nco_crcf_set_frequency(shifter, 2.0f * kPi * static_cast<float>(offset) / kCaptureRateHz);
-            if (target != tuned_hz) {
-                pipeline.reset();
-                freqdem_reset(nfm_demod);
-                freqdem_reset(wfm_demod);
-                deemph = 0.0f;
-                fade_in = kDefaultRxSampleRateHz / 200;
-                settle_chunks = 4;
-                noise_floor_valid = false;
-            }
-            tuned_hz = target;
-            tuned_offset = offset;
-            tuned_direct = direct;
-        }
         if (static_cast<int>(mode) != last_mode || bandwidth != last_bw) {
             last_mode = static_cast<int>(mode);
             last_bw = bandwidth;
@@ -246,6 +260,8 @@ void RtlReceiver::run() {
         pipeline.set_auto_notch(auto_notch_.load());
 
         int n_read = 0;
+        bool fresh = false;
+        CaptureQueue::Chunk chunk;
         {
             std::unique_lock<std::mutex> lock(chunk_mutex);
             chunk_cv.wait_for(lock, std::chrono::milliseconds(200),
@@ -254,19 +270,46 @@ void RtlReceiver::run() {
                 if (reader_failed.load()) break;
                 continue;
             }
-            n_read = static_cast<int>(chunks.front().size());
-            std::copy(chunks.front().begin(), chunks.front().end(), raw.begin());
-            chunks.pop_front();
+            chunk = chunks.pop();
+            fresh = chunk.generation == chunks.generation();
+            n_read = static_cast<int>(chunk.bytes.size());
+            std::copy(chunk.bytes.begin(), chunk.bytes.end(), raw.begin());
+        }
+        if (chunk.generation != tuned_generation) {
+            tuned_generation = chunk.generation;
+            settle_chunks = 2;
+        }
+        int effective_offset = chunk.offset_hz;
+        if (mode == model::RadioMode::Wfm) {
+            const uint64_t target = frequency_hz_.load() + rit_hz_.load();
+            const auto digital_offset = wfm_digital_offset(target, chunk.target_hz,
+                                                            chunk.direct, chunk.offset_hz);
+            if (digital_offset) effective_offset = *digital_offset;
+        }
+        if (chunk.target_hz != tuned_hz || effective_offset != tuned_offset
+            || chunk.direct != tuned_direct) {
+            nco_crcf_set_frequency(shifter, 2.0f * kPi * static_cast<float>(effective_offset) / kCaptureRateHz);
+            if (chunk.target_hz != tuned_hz) {
+                pipeline.reset();
+                freqdem_reset(nfm_demod);
+                freqdem_reset(wfm_demod);
+                deemph = 0.0f;
+                fade_in = kDefaultRxSampleRateHz / 200;
+                noise_floor_valid = false;
+            }
+            tuned_hz = chunk.target_hz;
+            tuned_offset = effective_offset;
+            tuned_direct = chunk.direct;
         }
         // Audio keeps flowing through a retune; only the waterfall skips the settling data.
-        const bool settling = settle_chunks > 0;
-        if (settling) --settle_chunks;
+        const bool settling = !fresh || settle_chunks > 0;
+        if (fresh && settle_chunks > 0) --settle_chunks;
         const size_t count = static_cast<size_t>(n_read) / 2;
         for (size_t i = 0; i < count; ++i) {
             input[i] = liquid_float_complex{(raw[2 * i] - 127.5f) / 127.5f,
                                             (raw[2 * i + 1] - 127.5f) / 127.5f};
         }
-        if (offset != 0) nco_crcf_mix_block_down(shifter, input.data(), input.data(), static_cast<unsigned>(count));
+        if (tuned_offset != 0) nco_crcf_mix_block_down(shifter, input.data(), input.data(), static_cast<unsigned>(count));
 
         const bool wfm = mode == model::RadioMode::Wfm;
         unsigned mid_count = 0;
@@ -280,7 +323,7 @@ void RtlReceiver::run() {
             spectrum_iq[i] = {static_cast<int32_t>(view_src[i].real * 8388607.0f),
                               static_cast<int32_t>(view_src[i].imag * 8388607.0f)};
         }
-        if (!settling) LiveSpectrumBuffer::push_iq(spectrum_iq.data(), view_count);
+        if (!settling) LiveSpectrumBuffer::push_iq(spectrum_iq.data(), view_count, wfm ? tuned_offset : 0);
 
         unsigned produced = 0;
         auto& channel = wfm ? wide_iq : narrow_iq;

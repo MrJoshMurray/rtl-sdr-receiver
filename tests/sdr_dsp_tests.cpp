@@ -5,7 +5,10 @@
  */
 
 #include "sdr/receive_demodulator.h"
+#include "sdr/receive_audio_pipeline.h"
+#include "sdr/capture_queue.h"
 #include "sdr/spectrum_simulator.h"
+#include "sdr/wfm_tuning.h"
 
 #include <algorithm>
 #include <cassert>
@@ -225,6 +228,160 @@ void test_live_spectrum_tones() {
     }
 }
 
+void test_live_spectrum_display_bins() {
+    constexpr size_t sample_count = 2048;
+    std::vector<platform::sdr::IqSample> iq(sample_count);
+    platform::sdr::SpectrumFrame frame{};
+    for (const int bin : {4, 71, 105, 183, 270, 284}) {
+        platform::sdr::LiveSpectrumBuffer::set_blanked(true);
+        assert(platform::sdr::LiveSpectrumBuffer::snapshot(frame));
+        platform::sdr::LiveSpectrumBuffer::set_blanked(false);
+        const float frequency = static_cast<float>(bin) / frame.size() - 0.5f;
+        uint32_t random = 1;
+        const auto noise = [&] {
+            random = random * 1664525u + 1013904223u;
+            return (static_cast<float>(random >> 8) / 16777216.0f - 0.5f) * 0.02f;
+        };
+        for (size_t sample = 0; sample < iq.size(); ++sample) {
+            const float phase = 2.0f * kPi * frequency * sample;
+            iq[sample] = {quantize(0.15f * std::cos(phase) + noise()),
+                          quantize(0.15f * std::sin(phase) + noise())};
+        }
+        platform::sdr::LiveSpectrumBuffer::push_iq(iq.data(), iq.size());
+        for (int iteration = 0; iteration < 60; ++iteration)
+            assert(platform::sdr::LiveSpectrumBuffer::snapshot(frame));
+        const auto peak = std::max_element(frame.begin(), frame.end()) - frame.begin();
+        assert(std::abs(static_cast<int>(peak) - bin) <= 1);
+        assert(frame[peak] > 0);
+    }
+}
+
+void test_wfm_digital_tuning() {
+    using platform::sdr::wfm_digital_offset;
+    constexpr uint64_t center = 98000000;
+    assert(wfm_digital_offset(center, center, false, 0) == 0);
+    assert(wfm_digital_offset(center + 200000, center, false, 0) == 200000);
+    assert(wfm_digital_offset(center - 200000, center, false, 0) == -200000);
+    assert(!wfm_digital_offset(center + 200001, center, false, 0));
+    assert(!wfm_digital_offset(center - 200001, center, false, 0));
+    assert(!wfm_digital_offset(center, 0, false, 0));
+    assert(!wfm_digital_offset(center, center, true, 0));
+    assert(!wfm_digital_offset(center, center, false, 200000));
+
+    for (const int offset : {-200000, -10, 10, 200000}) {
+        auto nco = nco_crcf_create(LIQUID_NCO);
+        assert(nco);
+        const auto actual = wfm_digital_offset(center + offset, center, false, 0);
+        assert(actual && *actual == offset);
+        assert(nco_crcf_set_frequency(nco, 2.0f * kPi * *actual / 960000.0f) == LIQUID_OK);
+        std::vector<liquid_float_complex> input(4096);
+        std::vector<liquid_float_complex> output(input.size());
+        for (size_t i = 0; i < input.size(); ++i) {
+            const float phase = 2.0f * kPi * offset * i / 960000.0f;
+            input[i] = {std::cos(phase), std::sin(phase)};
+        }
+        assert(nco_crcf_mix_block_down(nco, input.data(), output.data(), output.size()) == LIQUID_OK);
+        double mean_real = 0.0;
+        double mean_imag = 0.0;
+        for (const auto& sample : output) {
+            mean_real += sample.real;
+            mean_imag += sample.imag;
+        }
+        assert(std::hypot(mean_real, mean_imag) / output.size() > 0.99);
+        nco_crcf_destroy(nco);
+    }
+}
+
+void test_shifted_spectrum_edges() {
+    std::vector<platform::sdr::IqSample> iq(2048);
+    platform::sdr::SpectrumFrame frame{};
+    platform::sdr::LiveSpectrumBuffer::set_span_hz(960000);
+    for (const int direction : {-1, 1}) {
+        const int valid_bin = direction > 0 ? 180 : 108;
+        const int wrapped_bin = direction > 0 ? 230 : 58;
+        for (size_t sample = 0; sample < iq.size(); ++sample) {
+            const float valid_phase = 2.0f * kPi * (static_cast<float>(valid_bin) / 288 - 0.5f) * sample;
+            const float wrapped_phase = 2.0f * kPi * (static_cast<float>(wrapped_bin) / 288 - 0.5f) * sample;
+            iq[sample] = {quantize(0.15f * std::cos(valid_phase) + 0.3f * std::cos(wrapped_phase)),
+                          quantize(0.15f * std::sin(valid_phase) + 0.3f * std::sin(wrapped_phase))};
+        }
+        platform::sdr::LiveSpectrumBuffer::set_blanked(true);
+        assert(platform::sdr::LiveSpectrumBuffer::snapshot(frame));
+        platform::sdr::LiveSpectrumBuffer::set_blanked(false);
+        platform::sdr::LiveSpectrumBuffer::push_iq(iq.data(), iq.size(), direction * 200000);
+        for (int i = 0; i < 40; ++i)
+            assert(platform::sdr::LiveSpectrumBuffer::snapshot(frame));
+        assert(frame[valid_bin] > 0);
+        assert(frame[wrapped_bin] == 0);
+    }
+}
+
+void test_retune_capture_queue() {
+    platform::sdr::CaptureQueue queue;
+    for (uint8_t value = 0; value < 10; ++value)
+        queue.push(&value, 1, queue.generation(), 98000000, 0, false);
+    const auto old_generation = queue.generation();
+    queue.retune(true);
+    for (uint8_t value = 6; value < 10; ++value) {
+        const auto chunk = queue.pop();
+        assert(chunk.bytes[0] == value);
+        assert(chunk.generation != queue.generation());
+        assert(chunk.target_hz == 98000000 && chunk.offset_hz == 0 && !chunk.direct);
+    }
+    const uint8_t late = 10;
+    queue.push(&late, 1, old_generation, 98000000, 0, false);
+    assert(queue.pop().generation != queue.generation());
+    const uint8_t fresh = 11;
+    queue.push(&fresh, 1, queue.generation(), 98100000, 200000, false);
+    const auto new_chunk = queue.pop();
+    assert(new_chunk.generation == queue.generation());
+    assert(new_chunk.target_hz == 98100000 && new_chunk.offset_hz == 200000);
+    queue.push(&fresh, 1, queue.generation(), 98100000, 200000, false);
+    const auto previous = queue.generation();
+    queue.retune(false);
+    queue.push(&late, 1, previous, 98100000, 200000, false);
+    assert(queue.empty());
+    queue.push(&fresh, 1, queue.generation(), 9800000, 0, true);
+    assert(queue.pop().generation == queue.generation());
+}
+
+class RecordingSink : public platform::audio::MonoAudioSink {
+public:
+    bool write(const int16_t* samples, size_t count, std::string&) override {
+        audio.assign(samples, samples + count);
+        return true;
+    }
+    std::vector<int16_t> audio;
+};
+
+void test_retune_audio_fade() {
+    RecordingSink sink;
+    platform::sdr::ReceiveAudioPipeline pipeline(sink);
+    platform::sdr::DemodulatorSettings settings;
+    settings.mode = platform::sdr::DemodMode::Am;
+    std::string error;
+    assert(pipeline.configure(settings, error));
+    std::vector<platform::sdr::IqSample> iq(kSampleRateHz * 3 / 5);
+    for (size_t sample = 0; sample < iq.size(); ++sample) {
+        const float phase = 2.0f * kPi * 1000.0f * sample / kSampleRateHz;
+        iq[sample] = {quantize(0.3f + 0.1f * std::sin(phase)), 0};
+    }
+    assert(pipeline.process_iq(iq.data(), iq.size(), error));
+    const auto audio_rms = [&](size_t first, size_t last) {
+        double energy = 0;
+        for (size_t i = first; i < last; ++i)
+            energy += static_cast<double>(sink.audio[i]) * sink.audio[i];
+        return std::sqrt(energy / (last - first));
+    };
+    const double steady = audio_rms(iq.size() - 4800, iq.size());
+    assert(steady > 1.0);
+    for (int retune = 0; retune < 4; ++retune) {
+        pipeline.reset();
+        assert(pipeline.process_iq(iq.data(), 5760, error));
+        assert(audio_rms(2880, 5760) > steady * 0.4);
+    }
+}
+
 void test_signal_level() {
     platform::sdr::ReceiveDemodulator demodulator;
     platform::sdr::DemodulatorSettings settings;
@@ -269,5 +426,10 @@ int main() {
     test_am_bandwidth();
     test_sideband_selection();
     test_live_spectrum_tones();
+    test_live_spectrum_display_bins();
+    test_wfm_digital_tuning();
+    test_shifted_spectrum_edges();
+    test_retune_capture_queue();
+    test_retune_audio_fade();
     test_signal_level();
 }

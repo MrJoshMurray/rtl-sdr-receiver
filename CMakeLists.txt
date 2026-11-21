@@ -6,7 +6,7 @@
 
 cmake_minimum_required(VERSION 3.31)
 
-project(rtl-sdr-receiver VERSION 0.1.0 LANGUAGES C CXX)
+project(rtl-sdr-receiver VERSION 0.1.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -372,7 +372,10 @@ else()
         endif()
     endif()
     if(NOT ALSA_INCLUDE_DIR OR NOT ALSA_LIBRARY)
-        message(WARNING "ALSA headers/library not found in ${CM0_SYSROOT}; device audio output will be unavailable")
+        message(FATAL_ERROR
+            "ALSA headers/library not found in ${CM0_SYSROOT}; device audio is required.\n"
+            "Provide matching target ALSA development headers in the sysroot or set "
+            "-DALSA_INCLUDE_DIR=<path containing alsa/asoundlib.h>.")
     endif()
 
     set(PLATFORM_INCLUDE_DIR ${CM0_MULTIARCH_INCLUDE_DIRS})
@@ -694,8 +697,31 @@ if(BUILD_TESTING AND USE_DESKTOP)
     target_link_libraries(${PROJECT_NAME}_dsp_tests
         PRIVATE
             ${PROJECT_NAME}_platform
+            ${PROJECT_NAME}_model
     )
     add_test(NAME ${PROJECT_NAME}_dsp_tests COMMAND ${PROJECT_NAME}_dsp_tests)
+
+    if(UNIX)
+        add_library(rtl_receiver_test_device SHARED tests/fake_rtlsdr.cpp)
+        set_target_properties(rtl_receiver_test_device PROPERTIES
+            OUTPUT_NAME rtlsdr
+            SOVERSION 0
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fake-rtl"
+        )
+        add_executable(${PROJECT_NAME}_rtl_receiver_tests tests/rtl_receiver_tests.cpp)
+        target_link_libraries(${PROJECT_NAME}_rtl_receiver_tests PRIVATE
+            ${PROJECT_NAME}_platform ${PROJECT_NAME}_model ${CMAKE_DL_LIBS})
+        add_dependencies(${PROJECT_NAME}_rtl_receiver_tests rtl_receiver_test_device)
+        add_test(NAME ${PROJECT_NAME}_rtl_receiver_tests
+            COMMAND ${PROJECT_NAME}_rtl_receiver_tests $<TARGET_FILE:rtl_receiver_test_device>)
+        if(APPLE)
+            set_tests_properties(${PROJECT_NAME}_rtl_receiver_tests PROPERTIES
+                ENVIRONMENT "DYLD_LIBRARY_PATH=$<TARGET_FILE_DIR:rtl_receiver_test_device>")
+        else()
+            set_tests_properties(${PROJECT_NAME}_rtl_receiver_tests PROPERTIES
+                ENVIRONMENT "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:rtl_receiver_test_device>")
+        endif()
+    endif()
 
     add_executable(${PROJECT_NAME}_radio_settings_tests
         tests/radio_settings_tests.cpp

@@ -6,8 +6,11 @@
 
 #include "spectrum_simulator.h"
 
+#include <liquid/liquid.h>
+
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cmath>
 #include <mutex>
@@ -25,6 +28,21 @@ constexpr float kSpectrumDisplayOffsetDb = 75.0f;
 std::array<IqSample, kLiveSpectrumSamples> live_iq_buffer{};
 size_t live_iq_count = 0;
 size_t live_iq_write_index = 0;
+int32_t live_iq_shift_hz = 0;
+
+struct SpectrumFft {
+    std::array<liquid_float_complex, kLiveSpectrumSamples> input{};
+    std::array<liquid_float_complex, kLiveSpectrumSamples> output{};
+    fftplan plan = fft_create_plan(kLiveSpectrumSamples, input.data(), output.data(),
+                                   LIQUID_FFT_FORWARD, 0);
+
+    SpectrumFft() {
+        if (!plan) std::fprintf(stderr, "Failed to create spectrum FFT plan\n");
+    }
+    ~SpectrumFft() {
+        if (plan) fft_destroy_plan(plan);
+    }
+};
 
 const std::array<float, kLiveSpectrumSamples>& hann_window() noexcept {
     static const auto window = [] {
@@ -65,12 +83,13 @@ SpectrumFrame make_simulated_spectrum(uint32_t frame_index) noexcept {
     return spectrum;
 }
 
-void LiveSpectrumBuffer::push_iq(const IqSample* samples, size_t sample_count) noexcept {
+void LiveSpectrumBuffer::push_iq(const IqSample* samples, size_t sample_count, int32_t shift_hz) noexcept {
     if (!samples || sample_count == 0) {
         return;
     }
 
     std::lock_guard<std::mutex> lock(live_spectrum_mutex);
+    live_iq_shift_hz = shift_hz;
     for (size_t sample = 0; sample < sample_count; ++sample) {
         live_iq_buffer[live_iq_write_index] = samples[sample];
         live_iq_write_index = (live_iq_write_index + 1) % kLiveSpectrumSamples;
@@ -98,6 +117,7 @@ bool LiveSpectrumBuffer::snapshot(SpectrumFrame& frame) noexcept {
         return true;
     }
     std::array<IqSample, kLiveSpectrumSamples> samples{};
+    int32_t shift_hz = 0;
     {
         std::lock_guard<std::mutex> lock(live_spectrum_mutex);
         if (live_iq_count < kLiveSpectrumSamples) {
@@ -105,6 +125,7 @@ bool LiveSpectrumBuffer::snapshot(SpectrumFrame& frame) noexcept {
         }
 
         const size_t first_sample = live_iq_write_index;
+        shift_hz = live_iq_shift_hz;
         for (size_t sample = 0; sample < kLiveSpectrumSamples; ++sample) {
             samples[sample] = live_iq_buffer[
                 (first_sample + sample) % kLiveSpectrumSamples];
@@ -124,46 +145,53 @@ bool LiveSpectrumBuffer::snapshot(SpectrumFrame& frame) noexcept {
     mean_i /= static_cast<float>(kLiveSpectrumSamples);
     mean_q /= static_cast<float>(kLiveSpectrumSamples);
 
+    static SpectrumFft fft;
+    if (!fft.plan) return false;
+    for (size_t sample = 0; sample < kLiveSpectrumSamples; ++sample) {
+        fft.input[sample] = {
+            (static_cast<float>(samples[sample].i) / kFullScale - mean_i) * window[sample],
+            (static_cast<float>(samples[sample].q) / kFullScale - mean_q) * window[sample]};
+    }
+    if (fft_execute(fft.plan) != LIQUID_OK) {
+        std::fprintf(stderr, "Spectrum FFT failed\n");
+        return false;
+    }
     for (size_t bin = 0; bin < kSpectrumBinCount; ++bin) {
-        const float normalized_bin = static_cast<float>(bin)
-                                   / static_cast<float>(kSpectrumBinCount);
-        const float centered_bin = normalized_bin - 0.5f;
-        float real_sum = 0.0f;
-        float imag_sum = 0.0f;
-        const float phase_step = -2.0f * 3.14159265358979323846f
-                               * centered_bin;
-        float phase_cos = 1.0f;
-        float phase_sin = 0.0f;
-        const float step_cos = std::cos(phase_step);
-        const float step_sin = std::sin(phase_step);
-        for (size_t sample = 0; sample < kLiveSpectrumSamples; ++sample) {
-            const auto& iq = samples[sample];
-            const float i = static_cast<float>(iq.i) / kFullScale - mean_i;
-            const float q = static_cast<float>(iq.q) / kFullScale - mean_q;
-            const float weighted_i = window[sample] * i;
-            const float weighted_q = window[sample] * q;
-            real_sum += weighted_i * phase_cos - weighted_q * phase_sin;
-            imag_sum += weighted_i * phase_sin + weighted_q * phase_cos;
-            const float next_cos = phase_cos * step_cos - phase_sin * step_sin;
-            phase_sin = phase_sin * step_cos + phase_cos * step_sin;
-            phase_cos = next_cos;
-        }
-        power[bin] = (real_sum * real_sum + imag_sum * imag_sum)
+        const size_t fft_bin = ((bin * kLiveSpectrumSamples + kSpectrumBinCount / 2)
+                                / kSpectrumBinCount + kLiveSpectrumSamples / 2)
+                               % kLiveSpectrumSamples;
+        const auto value = fft.output[fft_bin];
+        power[bin] = (value.real * value.real + value.imag * value.imag)
                    / static_cast<float>(kLiveSpectrumSamples * kLiveSpectrumSamples);
     }
 
     SpectrumFrame next{};
     std::array<float, kSpectrumBinCount> decibels{};
+    std::array<bool, kSpectrumBinCount> valid{};
+    std::array<float, kSpectrumBinCount> sorted{};
+    size_t valid_count = 0;
+    const int64_t span = live_spectrum_span.load();
+    const int64_t half_span_scaled = span * static_cast<int64_t>(kSpectrumBinCount);
     for (size_t bin = 0; bin < next.size(); ++bin) {
+        const int64_t frequency_scaled = (2 * static_cast<int64_t>(bin)
+                                         - static_cast<int64_t>(kSpectrumBinCount)) * span
+                                       + 2 * static_cast<int64_t>(kSpectrumBinCount) * shift_hz;
+        valid[bin] = frequency_scaled >= -half_span_scaled && frequency_scaled < half_span_scaled;
+        if (!valid[bin]) {
+            live_spectrum_power[bin] = 0.0f;
+            continue;
+        }
         live_spectrum_power[bin] = live_spectrum_power[bin] * 0.6f + power[bin] * 0.4f;
         decibels[bin] = 10.0f * std::log10(std::max(live_spectrum_power[bin], 1.0e-16f));
+        sorted[valid_count++] = decibels[bin];
     }
     // Auto-scale: track the noise floor (25th percentile) so the display stays useful at any gain.
-    auto sorted = decibels;
-    std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 4, sorted.end());
-    static float floor_db = sorted[sorted.size() / 4];
-    floor_db += 0.1f * (sorted[sorted.size() / 4] - floor_db);
+    if (valid_count == 0) return false;
+    std::nth_element(sorted.begin(), sorted.begin() + valid_count / 4, sorted.begin() + valid_count);
+    static float floor_db = sorted[valid_count / 4];
+    floor_db += 0.1f * (sorted[valid_count / 4] - floor_db);
     for (size_t bin = 0; bin < next.size(); ++bin) {
+        if (!valid[bin]) continue;
         const float scaled = std::clamp((decibels[bin] - floor_db + 6.0f) * 5.0f, 0.0f, 255.0f);
         next[bin] = static_cast<uint8_t>(scaled);
     }

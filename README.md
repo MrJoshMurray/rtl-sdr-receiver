@@ -6,6 +6,9 @@ Tune from 0.1 MHz to about 1.7 GHz: broadcast FM, AM and shortwave, airband, mil
 
 Plug the dongle into the USB-A port and connect an antenna. The package installs a udev rule so no root is needed.
 
+In FMW, small tuning changes use digital tuning within the current capture window. The
+waterfall's unavailable outer edge is blank until the hardware tuner recenters.
+
 ## Keys
 
 | Key | What it does |
@@ -24,6 +27,11 @@ Plug the dongle into the USB-A port and connect an antenna. The package installs
 ![Receiver](screenshot/rtl-sdr-receiver.png) ![Frequency page](screenshot/rtl-sdr-frequency.png)
 
 ## Building
+
+The device build requires target ALSA headers and library. If the BSP lacks the headers, extract
+the matching ARM64 `libasound2-dev` package and configure with
+`cmake --preset cp0-cross -DALSA_INCLUDE_DIR=<extracted-dir>/usr/include` before the workflow.
+The device build fails rather than producing a receiver without audio support.
 
 ```sh
 cmake --preset darwin-arm64 && cmake --build build/darwin-arm64   # desktop simulator

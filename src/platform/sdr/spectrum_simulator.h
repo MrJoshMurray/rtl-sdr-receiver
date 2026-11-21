@@ -22,7 +22,7 @@ SpectrumFrame make_simulated_spectrum(uint32_t frame_index) noexcept;
 
 class LiveSpectrumBuffer {
 public:
-	static void push_iq(const IqSample* samples, size_t sample_count) noexcept;
+	static void push_iq(const IqSample* samples, size_t sample_count, int32_t shift_hz = 0) noexcept;
 	static bool snapshot(SpectrumFrame& frame) noexcept;
 	// While blanked, snapshots return an empty spectrum and drop the smoothing history.
 	static void set_blanked(bool blanked) noexcept;

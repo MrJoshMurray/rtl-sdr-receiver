@@ -118,6 +118,7 @@ void ReceiveAudioPipeline::reset() {
         agc_rrrf_set_scale(audio_agc_, kAudioAgcScale);
     }
     audio_level_ = 0.0f;
+    if (settings_) fade_samples_ = std::max<size_t>(1, settings_->sample_rate_hz / 200);
     fade_position_ = 0;
     std::fill(audio_float_.begin(), audio_float_.end(), 0.0f);
     std::fill(audio_pcm_.begin(), audio_pcm_.end(), int16_t{0});
