@@ -162,7 +162,7 @@ void test_am_bandwidth() {
 void test_sideband_selection() {
     std::vector<platform::sdr::IqSample> iq(kSampleCount);
     std::vector<float> audio(kSampleCount);
-    auto modulator = ampmodem_create(0.5f, LIQUID_AMPMODEM_LSB, 1);
+    auto modulator = ampmodem_create(0.5f, LIQUID_AMPMODEM_USB, 1);
     assert(modulator);
     for (size_t index = 0; index < iq.size(); ++index) {
         liquid_float_complex signal{};
@@ -184,7 +184,7 @@ void test_sideband_selection() {
     assert(selected > 0.03f);
     assert(tone_amplitude(audio, 1000.0f) < selected * 0.1f);
 
-    modulator = ampmodem_create(0.5f, LIQUID_AMPMODEM_LSB, 1);
+    modulator = ampmodem_create(0.5f, LIQUID_AMPMODEM_USB, 1);
     assert(modulator);
     for (size_t index = 0; index < iq.size(); ++index) {
         liquid_float_complex signal{};
@@ -204,6 +204,85 @@ void test_sideband_selection() {
     const float wide = tone_amplitude(audio, 2400.0f);
     assert(wide > 0.03f);
     assert(narrow < wide * 0.1f);
+}
+
+void test_sideband_capture_paths() {
+    constexpr size_t input_count = 240000;
+    constexpr uint32_t target_hz = 121000000;
+    constexpr double capture_rate_hz = 960000.0;
+    const auto interpolator = msresamp_crcf_create(
+        static_cast<float>(capture_rate_hz / kSampleRateHz), 60.0f);
+    const auto resampler = msresamp_crcf_create(
+        static_cast<float>(kSampleRateHz / capture_rate_hz), 60.0f);
+    assert(interpolator && resampler);
+
+    for (const bool direct : {false, true}) {
+        const int hardware_offset = direct ? 0 : platform::sdr::kNarrowTunerOffsetHz;
+        const auto shift = platform::sdr::digital_tuning_offset(
+            target_hz, target_hz, direct, hardware_offset, direct, hardware_offset);
+        assert(shift == (direct ? 0 : -platform::sdr::kNarrowTunerOffsetHz));
+        for (const auto sideband : {LIQUID_AMPMODEM_USB, LIQUID_AMPMODEM_LSB}) {
+            auto modulator = ampmodem_create(0.5f, sideband, 1);
+            auto mixer = nco_crcf_create(LIQUID_NCO);
+            assert(modulator && mixer);
+            assert(nco_crcf_set_frequency(mixer, 2.0f * kPi * *shift / capture_rate_hz) == LIQUID_OK);
+            std::vector<liquid_float_complex> baseband(kSampleCount);
+            std::vector<liquid_float_complex> captured(input_count + 128);
+            std::vector<liquid_float_complex> centered(input_count + 128);
+            std::vector<liquid_float_complex> audio_iq(input_count / 20 + 128);
+            for (size_t sample = 0; sample < baseband.size(); ++sample) {
+                const float audio_tone = 0.25f * std::sin(
+                    2.0f * kPi * 1000.0f * static_cast<float>(sample) / kSampleRateHz);
+                assert(ampmodem_modulate(modulator, audio_tone, &baseband[sample]) == LIQUID_OK);
+            }
+            unsigned captured_count = 0;
+            assert(msresamp_crcf_execute(interpolator, baseband.data(),
+                    static_cast<unsigned>(baseband.size()), captured.data(), &captured_count) == LIQUID_OK);
+            assert(captured_count >= input_count);
+            for (size_t sample = 0; sample < captured_count; ++sample) {
+                const float phase = -2.0f * kPi * hardware_offset
+                                  * static_cast<float>(sample) / capture_rate_hz;
+                const float shift_real = std::cos(phase);
+                const float shift_imag = std::sin(phase);
+                const auto signal = captured[sample];
+                captured[sample] = {signal.real * shift_real - signal.imag * shift_imag,
+                                    signal.real * shift_imag + signal.imag * shift_real};
+            }
+            assert(nco_crcf_mix_block_down(mixer, captured.data(), centered.data(),
+                                           captured_count) == LIQUID_OK);
+            unsigned audio_count = 0;
+            assert(msresamp_crcf_execute(resampler, centered.data(), captured_count,
+                    audio_iq.data(), &audio_count) == LIQUID_OK);
+            assert(audio_count >= kSampleCount);
+            std::vector<platform::sdr::IqSample> quantized(audio_count);
+            for (unsigned sample = 0; sample < audio_count; ++sample) {
+                quantized[sample] = {quantize(audio_iq[sample].real),
+                                     quantize(audio_iq[sample].imag)};
+            }
+            std::vector<float> audio(audio_count);
+            platform::sdr::ReceiveDemodulator demodulator;
+            platform::sdr::DemodulatorSettings settings;
+            settings.mode = sideband == LIQUID_AMPMODEM_USB
+                ? platform::sdr::DemodMode::Usb : platform::sdr::DemodMode::Lsb;
+            std::string error;
+            assert(demodulator.configure(settings, error));
+            assert(demodulator.process(quantized.data(), audio_count,
+                                       audio.data(), audio.size(), error));
+            const float selected = tone_amplitude(audio, 1000.0f);
+            settings.mode = sideband == LIQUID_AMPMODEM_USB
+                ? platform::sdr::DemodMode::Lsb : platform::sdr::DemodMode::Usb;
+            assert(demodulator.configure(settings, error));
+            assert(demodulator.process(quantized.data(), audio_count,
+                                       audio.data(), audio.size(), error));
+            const float rejected = tone_amplitude(audio, 1000.0f);
+            assert(selected > 0.03f);
+            assert(rejected < selected * 0.1f);
+            nco_crcf_destroy(mixer);
+            ampmodem_destroy(modulator);
+        }
+    }
+    msresamp_crcf_destroy(interpolator);
+    msresamp_crcf_destroy(resampler);
 }
 
 void test_live_spectrum_tones() {
@@ -478,12 +557,13 @@ void test_signal_level() {
 } // namespace
 
 int main() {
-    test_am_ssb_mode(platform::sdr::DemodMode::Usb, LIQUID_AMPMODEM_LSB, 1);
-    test_am_ssb_mode(platform::sdr::DemodMode::Lsb, LIQUID_AMPMODEM_USB, 1);
+    test_am_ssb_mode(platform::sdr::DemodMode::Usb, LIQUID_AMPMODEM_USB, 1);
+    test_am_ssb_mode(platform::sdr::DemodMode::Lsb, LIQUID_AMPMODEM_LSB, 1);
     test_am_ssb_mode(platform::sdr::DemodMode::Am, LIQUID_AMPMODEM_DSB, 0);
     test_cw_mode();
     test_am_bandwidth();
     test_sideband_selection();
+    test_sideband_capture_paths();
     test_live_spectrum_tones();
     test_live_spectrum_display_bins();
     test_spectrum_retune_history();

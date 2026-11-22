@@ -98,12 +98,12 @@ bool ReceiveDemodulator::configure(const DemodulatorSettings& settings, std::str
     switch (settings.mode) {
     case DemodMode::Usb:
         next->amplitude_demodulator = ampmodem_create(kAmModulationIndex,
-                                                      LIQUID_AMPMODEM_LSB,
+                                                      LIQUID_AMPMODEM_USB,
                                                       1);
         break;
     case DemodMode::Lsb:
         next->amplitude_demodulator = ampmodem_create(kAmModulationIndex,
-                                                      LIQUID_AMPMODEM_USB,
+                                                      LIQUID_AMPMODEM_LSB,
                                                       1);
         break;
     case DemodMode::Am:
