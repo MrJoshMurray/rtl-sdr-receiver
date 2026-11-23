@@ -9,6 +9,8 @@
 #include "sdr/capture_queue.h"
 #include "sdr/spectrum_simulator.h"
 #include "sdr/digital_tuning.h"
+#include "sdr/signal_noise_estimator.h"
+#include "sdr/squelch.h"
 
 #include <algorithm>
 #include <cassert>
@@ -554,6 +556,213 @@ void test_signal_level() {
     assert(measure_tone(0.0f) > -22.0f);
 }
 
+void test_signal_noise_and_squelch() {
+    using namespace platform::sdr;
+    constexpr size_t count = 8192;
+    constexpr float sample_rate = 960000.0f;
+    std::vector<IqSample> samples(count);
+    auto generate = [&](float signal, float adjacent, float gain, float noise, uint32_t seed = 1234567) {
+        uint32_t random = seed;
+        const auto normal = [&]() {
+            double value = -6.0;
+            for (int i = 0; i < 12; ++i) {
+                random = random * 1664525u + 1013904223u;
+                value += static_cast<double>(random >> 8) / 16777216.0;
+            }
+            return value;
+        };
+        for (size_t i = 0; i < count; ++i) {
+            const double phase = 2.0 * kPi * 12000.0 * i / sample_rate;
+            const double adjacent_phase = 2.0 * kPi * 250000.0 * i / sample_rate;
+            const double ni = noise * normal() / std::sqrt(2.0);
+            const double nq = noise * normal() / std::sqrt(2.0);
+            samples[i] = {
+                quantize(gain * (signal * std::cos(phase) + adjacent * std::cos(adjacent_phase) + ni)),
+                quantize(gain * (signal * std::sin(phase) + adjacent * std::sin(adjacent_phase) + nq))
+            };
+        }
+    };
+
+    SignalNoiseEstimator meter;
+    meter.reset(960000, 180000, model::RadioMode::Wfm);
+    generate(0.2f, 0.0f, 1.0f, 0.1f);
+    meter.push(samples.data(), samples.size());
+    const auto strong = meter.estimate();
+    assert(strong && !strong->below_noise);
+    assert(strong->db > 10.0f && strong->db < 17.0f);
+    assert(squelch_is_open(false, 3, strong));
+    for (int i = 0; i < 20; ++i) {
+        meter.push(samples.data(), samples.size());
+        const auto sustained = meter.estimate();
+        assert(sustained && !sustained->below_noise);
+        assert(std::abs(sustained->db - strong->db) < 0.2f);
+        assert(squelch_is_open(true, 3, sustained));
+    }
+
+    generate(0.0f, 0.0f, 1.0f, 0.1f);
+    for (size_t i = 0; i < samples.size(); ++i) {
+        const double phase = 75.0 * std::sin(2.0 * kPi * 1000.0 * i / sample_rate);
+        samples[i].i += quantize(0.2 * std::cos(phase));
+        samples[i].q += quantize(0.2 * std::sin(phase));
+    }
+    meter.reset(960000, 180000, model::RadioMode::Wfm);
+    meter.push(samples.data(), samples.size());
+    const auto broadcast_fm = meter.estimate();
+    assert(broadcast_fm && !broadcast_fm->below_noise && broadcast_fm->db > 8.0f);
+    assert(squelch_is_open(false, 3, broadcast_fm));
+
+    generate(0.2f, 0.3f, 1.0f, 0.1f);
+    meter.reset(960000, 180000, model::RadioMode::Wfm);
+    meter.push(samples.data(), samples.size());
+    const auto with_adjacent = meter.estimate();
+    assert(with_adjacent && !with_adjacent->below_noise);
+    assert(std::abs(with_adjacent->db - strong->db) < 1.5f);
+
+    generate(0.2f, 0.0f, 0.5f, 0.1f);
+    meter.reset(960000, 180000, model::RadioMode::Wfm);
+    meter.push(samples.data(), samples.size());
+    const auto lower_gain = meter.estimate();
+    assert(lower_gain && !lower_gain->below_noise);
+    assert(std::abs(lower_gain->db - strong->db) < 0.2f);
+
+    generate(0.2f, 0.0f, 1.0f, 0.1f);
+    for (const int shift : {-200000, 200000}) {
+        meter.reset(960000, 180000, model::RadioMode::Wfm, shift);
+        meter.push(samples.data(), samples.size());
+        const auto shifted = meter.estimate();
+        assert(shifted && !shifted->below_noise && shifted->db > 10.0f);
+    }
+
+    generate(0.04f, 0.0f, 1.0f, 0.1f);
+    meter.reset(960000, 180000, model::RadioMode::Wfm);
+    meter.push(samples.data(), samples.size());
+    const auto weak = meter.estimate();
+    assert(weak && (weak->below_noise || weak->db < strong->db - 8.0f));
+    assert(!squelch_is_open(true, 3, weak));
+
+    generate(0.0f, 0.0f, 1.0f, 0.1f);
+    meter.reset(960000, 180000, model::RadioMode::Wfm);
+    meter.push(samples.data(), samples.size());
+    const auto noise_only = meter.estimate();
+    assert(noise_only && (noise_only->below_noise || noise_only->db < 3.0f));
+    assert(!squelch_is_open(true, 3, noise_only));
+    for (uint32_t seed = 1; seed <= 20; ++seed) {
+        generate(0.0f, 0.0f, 1.0f, 0.1f, seed);
+        meter.reset(960000, 180000, model::RadioMode::Wfm);
+        meter.push(samples.data(), samples.size());
+        const auto noise = meter.estimate();
+        assert(noise && !squelch_is_open(true, 3, noise));
+    }
+    for (auto& sample : samples) sample.i += quantize(0.1f);
+    meter.reset(960000, 180000, model::RadioMode::Wfm);
+    meter.push(samples.data(), samples.size());
+    const auto dc_spike = meter.estimate();
+    assert(dc_spike && (dc_spike->below_noise || dc_spike->db < 3.0f));
+
+    std::fill(samples.begin(), samples.end(), IqSample{0, 0});
+    meter.reset(960000, 180000, model::RadioMode::Wfm);
+    meter.push(samples.data(), samples.size());
+    assert(!meter.estimate());
+    assert(!squelch_is_open(true, 3, std::nullopt));
+    assert(squelch_is_open(false, 0, std::nullopt));
+
+    assert(squelch_is_open(false, 6, SignalNoiseEstimate{6.0f, false}));
+    assert(!squelch_is_open(false, 6, SignalNoiseEstimate{5.0f, false}));
+    assert(squelch_is_open(true, 6, SignalNoiseEstimate{5.0f, false}));
+    assert(!squelch_is_open(true, 6, SignalNoiseEstimate{4.4f, false}));
+    assert(!squelch_is_open(true, 6, SignalNoiseEstimate{0.0f, true}));
+
+    const auto narrow_signal = [&](float tone_hz) {
+        uint32_t random = 1234567;
+        const auto random_component = [&]() {
+            double value = -6.0;
+            for (int i = 0; i < 12; ++i) {
+                random = random * 1664525u + 1013904223u;
+                value += static_cast<double>(random >> 8) / 16777216.0;
+            }
+            return value;
+        };
+        for (size_t i = 0; i < count; ++i) {
+            const double phase = 2.0 * kPi * tone_hz * i / 48000.0;
+            samples[i] = {quantize(0.15 * std::cos(phase) + 0.05 * random_component()),
+                          quantize(0.15 * std::sin(phase) + 0.05 * random_component())};
+        }
+    };
+    for (const auto mode : {model::RadioMode::Am, model::RadioMode::Nfm, model::RadioMode::Cw,
+                            model::RadioMode::Usb, model::RadioMode::Lsb}) {
+        const uint32_t bandwidth = mode == model::RadioMode::Nfm ? 20000
+                                 : mode == model::RadioMode::Cw ? 100 : 2800;
+        const float tone = mode == model::RadioMode::Usb ? -1000.0f
+                         : mode == model::RadioMode::Lsb ? 1000.0f : 0.0f;
+        narrow_signal(tone);
+        meter.reset(48000, bandwidth, mode);
+        meter.push(samples.data(), samples.size());
+        const auto in_band = meter.estimate();
+        assert(in_band && !in_band->below_noise && in_band->db > 8.0f);
+        if (mode == model::RadioMode::Usb || mode == model::RadioMode::Lsb) {
+            narrow_signal(-tone);
+            meter.reset(48000, bandwidth, mode);
+            meter.push(samples.data(), samples.size());
+            const auto opposite = meter.estimate();
+            assert(opposite && (opposite->below_noise || opposite->db < in_band->db - 15.0f));
+        }
+    }
+    meter.reset(48000, 20000, model::RadioMode::Nfm);
+    meter.push(samples.data(), 4095);
+    assert(!meter.estimate());
+    meter.reset(48000, 48000, model::RadioMode::Nfm);
+    meter.push(samples.data(), samples.size());
+    assert(!meter.estimate());
+    meter.reset(48000, 36000, model::RadioMode::Nfm);
+    meter.push(samples.data(), samples.size());
+    assert(!meter.estimate());
+}
+
+void test_signal_noise_after_resampling() {
+    using namespace platform::sdr;
+    constexpr size_t input_count = 160000;
+    std::vector<liquid_float_complex> input(input_count);
+    std::vector<liquid_float_complex> mid(input_count);
+    std::vector<liquid_float_complex> narrow(input_count);
+    uint32_t random = 34123;
+    const auto normal = [&]() {
+        double value = -6.0;
+        for (int i = 0; i < 12; ++i) {
+            random = random * 1664525u + 1013904223u;
+            value += static_cast<double>(random >> 8) / 16777216.0;
+        }
+        return value;
+    };
+    for (size_t i = 0; i < input_count; ++i) {
+        const double phase = 2.0 * kPi * 1000.0 * i / 960000.0;
+        input[i] = {static_cast<float>(0.2 * std::cos(phase) + 0.1 * normal() / std::sqrt(2.0)),
+                    static_cast<float>(0.2 * std::sin(phase) + 0.1 * normal() / std::sqrt(2.0))};
+    }
+    auto decim = msresamp_crcf_create(0.25f, 40.0f);
+    auto resamp = msresamp_crcf_create(0.2f, 40.0f);
+    assert(decim && resamp);
+    unsigned mid_count = 0;
+    unsigned narrow_count = 0;
+    msresamp_crcf_execute(decim, input.data(), input.size(), mid.data(), &mid_count);
+    msresamp_crcf_execute(resamp, mid.data(), mid_count, narrow.data(), &narrow_count);
+    msresamp_crcf_destroy(resamp);
+    msresamp_crcf_destroy(decim);
+    std::vector<IqSample> iq(narrow_count);
+    for (size_t i = 0; i < iq.size(); ++i)
+        iq[i] = {quantize(narrow[i].real), quantize(narrow[i].imag)};
+    SignalNoiseEstimator meter;
+    meter.reset(48000, 4500, model::RadioMode::Am);
+    meter.push(iq.data(), iq.size());
+    const auto result = meter.estimate();
+    assert(result && !result->below_noise);
+    assert(result->db > 26.0f && result->db < 33.0f);
+    meter.reset(48000, 20000, model::RadioMode::Nfm);
+    meter.push(iq.data(), iq.size());
+    const auto wide_nfm = meter.estimate();
+    assert(wide_nfm && !wide_nfm->below_noise);
+    assert(wide_nfm->db > 20.0f && wide_nfm->db < 26.0f);
+}
+
 } // namespace
 
 int main() {
@@ -572,4 +781,6 @@ int main() {
     test_retune_capture_queue();
     test_retune_audio_fade();
     test_signal_level();
+    test_signal_noise_and_squelch();
+    test_signal_noise_after_resampling();
 }

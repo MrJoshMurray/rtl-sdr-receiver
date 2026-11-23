@@ -400,7 +400,9 @@ void BaseModel::cycle_squelch(int direction) {
     if (direction == 0) {
         return;
     }
-    squelch_ = (squelch_ + (direction < 0 ? kMaxSquelch : 1)) % (kMaxSquelch + 1);
+    squelch_threshold_db_ = (squelch_threshold_db_
+        + (direction < 0 ? kMaxSquelchDb : kSquelchStepDb))
+        % (kMaxSquelchDb + kSquelchStepDb);
 }
 
 } // namespace model

@@ -72,8 +72,8 @@ public:
     void toggle_rit();
     void cycle_filter_bandwidth(int direction);
     void select_setting(int direction);
-    int squelch() const { return model_.squelch(); }
-    // Returns the new level (0 = off).
+    int squelch_threshold_db() const { return model_.squelch_threshold_db(); }
+    // Returns the new threshold in dB (0 = off).
     int cycle_squelch(int direction);
     void adjust_setting(int direction);
     // "Go to frequency" page.

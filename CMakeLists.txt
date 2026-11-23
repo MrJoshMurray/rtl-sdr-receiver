@@ -6,7 +6,7 @@
 
 cmake_minimum_required(VERSION 3.31)
 
-project(rtl-sdr-receiver VERSION 0.1.4 LANGUAGES C CXX)
+project(rtl-sdr-receiver VERSION 0.1.5 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -732,6 +732,9 @@ if(BUILD_TESTING AND USE_DESKTOP)
     )
     add_test(NAME ${PROJECT_NAME}_radio_settings_tests COMMAND ${PROJECT_NAME}_radio_settings_tests)
 
+    add_executable(${PROJECT_NAME}_radio_viewmodel_tests tests/radio_viewmodel_tests.cpp)
+    target_link_libraries(${PROJECT_NAME}_radio_viewmodel_tests PRIVATE ${PROJECT_NAME}_viewmodel)
+    add_test(NAME ${PROJECT_NAME}_radio_viewmodel_tests COMMAND ${PROJECT_NAME}_radio_viewmodel_tests)
 
     add_executable(${PROJECT_NAME}_audio_output_tests
         tests/audio_output_tests.cpp

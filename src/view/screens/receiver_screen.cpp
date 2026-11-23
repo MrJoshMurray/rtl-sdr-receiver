@@ -97,7 +97,6 @@ void ReceiverScreen::build_content(lv_obj_t* content) {
     reactive::bind_theme(band_mode, view_model().dark_mode_subject(), reactive::ThemeRole::Text);
     auto* signal_level = lv_label_create(content);
     lv_label_bind_text(signal_level, view_model().signal_level_subject(), nullptr);
-    lv_label_set_recolor(signal_level, true);
     lv_obj_set_size(signal_level, 120, LV_SIZE_CONTENT);
     lv_obj_set_pos(signal_level, 184, 0);
     lv_obj_set_style_text_align(signal_level, LV_TEXT_ALIGN_RIGHT, 0);

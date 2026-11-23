@@ -370,7 +370,7 @@ private:
                     const int level = view_model_.cycle_squelch(1);
                     char text[24]{};
                     if (level == 0) std::snprintf(text, sizeof(text), "Squelch off");
-                    else std::snprintf(text, sizeof(text), "Squelch S%d", level);
+                    else std::snprintf(text, sizeof(text), "Squelch %d dB", level);
                     toast_->show(text, view::widgets::ToastTone::Default, 1200);
                     return true;
                 }
@@ -604,7 +604,7 @@ int Application::run() {
         radio_audio = std::make_unique<platform::sdr::RtlReceiver>();
         radio_audio->set_frequency(view_model.frequency_hz());
         radio_audio->set_receive_settings(view_model.radio_mode(), view_model.filter_bandwidth_hz());
-        radio_audio->set_squelch(view_model.squelch());
+        radio_audio->set_squelch_threshold_db(view_model.squelch_threshold_db());
         radio_audio->start();
         LOG_INFO("RTL-SDR receive mode enabled");
     } else {
@@ -632,7 +632,7 @@ int Application::run() {
         if (radio_audio) {
             radio_audio->set_auto_notch(view_model.auto_notch());
             radio_audio->set_rit_hz(view_model.rit_hz());
-            radio_audio->set_squelch(view_model.squelch());
+            radio_audio->set_squelch_threshold_db(view_model.squelch_threshold_db());
             radio_audio->set_frequency(view_model.frequency_hz());
             radio_audio->set_receive_settings(view_model.radio_mode(), view_model.filter_bandwidth_hz());
             discovery_notice.update(radio_audio->discovery_state());

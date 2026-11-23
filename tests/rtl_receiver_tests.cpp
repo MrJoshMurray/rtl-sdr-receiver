@@ -30,10 +30,27 @@ int main(int argc, char** argv) {
     platform::sdr::RtlReceiver receiver;
     receiver.set_receive_settings(model::RadioMode::Wfm, 180000);
     receiver.set_frequency(98000000);
+    set_signal(98012000);
+    receiver.set_squelch_threshold_db(3);
     receiver.start();
     for (int i = 0; i < 200 && receiver.status() != model::RadioConnectionState::Receiving; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     assert(receiver.status() == model::RadioConnectionState::Receiving);
+    model::RadioMeasurements measured;
+    for (int i = 0; i < 200; ++i) {
+        measured = receiver.measurements();
+        if (measured.signal_to_noise_db && !measured.signal_below_noise
+            && *measured.signal_to_noise_db > 3.0f) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(measured.signal_to_noise_db && !measured.signal_below_noise
+           && *measured.signal_to_noise_db > 3.0f);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    measured = receiver.measurements();
+    assert(measured.signal_to_noise_db && !measured.signal_below_noise
+           && *measured.signal_to_noise_db > 3.0f);
+    set_signal(0);
+    receiver.set_squelch_threshold_db(0);
 
     const auto wait_for_frequency = [&](uint32_t expected) {
         for (int i = 0; i < 200 && frequency() != expected; ++i)

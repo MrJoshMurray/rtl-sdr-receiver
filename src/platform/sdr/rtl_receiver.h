@@ -28,7 +28,7 @@ public:
     void set_frequency(uint64_t frequency_hz) { frequency_hz_.store(frequency_hz); }
     void set_receive_settings(model::RadioMode mode, uint32_t bandwidth_hz);
     void set_auto_notch(bool enabled) { auto_notch_.store(enabled); }
-    void set_squelch(int level) { squelch_.store(level); }
+    void set_squelch_threshold_db(int threshold_db) { squelch_threshold_db_.store(threshold_db); }
     void set_rit_hz(int hz) { rit_hz_.store(hz); }
     void request_band_edge_tone() { output_.request_band_edge_tone(); }
 
@@ -53,7 +53,7 @@ private:
     std::atomic<uint32_t> bandwidth_hz_{180000};
     std::atomic<bool> auto_notch_{false};
     std::atomic<int> rit_hz_{0};
-    std::atomic<int> squelch_{0};
+    std::atomic<int> squelch_threshold_db_{0};
     mutable std::mutex measurements_mutex_;
     model::RadioMeasurements measurements_{};
 };

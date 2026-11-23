@@ -12,9 +12,6 @@
 
 namespace model {
 
-// S-meter reference: the level reported for S9.
-constexpr int kS9ReferenceDbfs = -40;
-
 enum class AppPage {
     Apple  = 0,
     Butter = 1,
@@ -42,7 +39,8 @@ enum class RadioDiscoveryState {
 };
 
 struct RadioMeasurements {
-    std::optional<int> signal_level_dbfs;
+    std::optional<float> signal_to_noise_db;
+    bool signal_below_noise{false};
     std::optional<bool> adc_overload;
 };
 
@@ -96,9 +94,10 @@ public:
     void cycle_filter_bandwidth(int direction);
 
     static constexpr int kSettingRows = 5;
-    // Squelch opens at this many S units (3 dB each) above the noise floor; 0 = off.
-    static constexpr int kMaxSquelch = 9;
-    int squelch() const { return squelch_; }
+    // The nine enabled positions retain the former numeric thresholds, now in SNR dB.
+    static constexpr int kSquelchStepDb = 3;
+    static constexpr int kMaxSquelchDb = 27;
+    int squelch_threshold_db() const { return squelch_threshold_db_; }
     void cycle_squelch(int direction);
     int selected_setting() const { return selected_setting_; }
     void select_setting(int direction);
@@ -107,7 +106,7 @@ public:
 
 private:
     int selected_setting_{0};
-    int squelch_{0};
+    int squelch_threshold_db_{0};
     bool dark_mode_ = true;
     AppPage current_page_ = AppPage::Apple;
     RadioMode radio_mode_ = RadioMode::Wfm;

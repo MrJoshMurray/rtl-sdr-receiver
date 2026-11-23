@@ -18,27 +18,6 @@ int page_to_int(model::AppPage page) {
     return static_cast<int>(page);
 }
 
-// Dongle I/Q is 8-bit, so S9 sits far above the old 24-bit radio's reference.
-constexpr int kS9ReferenceDbfs = model::kS9ReferenceDbfs;
-
-// 12-segment LED bar; the lit segments in the last three positions are drawn red
-// (LVGL label recolor markup).
-std::string led_bar(int lit) {
-    std::string bar;
-    bool red = false;
-    for (int i = 0; i < 12; ++i) {
-        const bool in_red_zone = i >= 9 && i < lit;
-        if (in_red_zone != red) {
-            bar += '#';
-            if (in_red_zone) bar += "ff3b30 ";
-            red = in_red_zone;
-        }
-        bar += i < lit ? '|' : '.';
-    }
-    if (red) bar += '#';
-    return bar;
-}
-
 void format_frequency(uint64_t frequency_hz, char* output, size_t output_size) {
     std::snprintf(output,
                   output_size,
@@ -84,7 +63,7 @@ BaseViewModel::BaseViewModel()
       frequency_subject_(""),
       band_mode_subject_(""),
       receiver_settings_subject_(""),
-      signal_level_subject_("S --"),
+      signal_level_subject_("SNR --"),
       radio_alert_subject_(""),
       setting_title_subjects_{{reactive::StringSubject<24>(""), reactive::StringSubject<24>(""),
                                reactive::StringSubject<24>(""), reactive::StringSubject<24>(""),
@@ -200,21 +179,11 @@ void BaseViewModel::set_radio_measurements(const model::RadioMeasurements& measu
     model_.set_radio_measurements(measurements);
     const auto& current = model_.radio_measurements();
     char text[64]{};
-    if (current.signal_level_dbfs) {
-        const int above_s9 = *current.signal_level_dbfs - kS9ReferenceDbfs;
-        int s_unit = 9;
-        int lit = 9;
-        if (above_s9 > 0) {
-            lit = 9 + std::clamp(above_s9 / 10, 0, 3);
-            std::snprintf(text, sizeof(text), "~S9+%d dB ", above_s9);
-        } else {
-            s_unit = std::clamp(9 + above_s9 / 3 - (above_s9 % 3 != 0 ? 1 : 0), 0, 9);
-            lit = s_unit;
-            std::snprintf(text, sizeof(text), "~S%d ", s_unit);
-        }
-        std::strncat(text, led_bar(lit).c_str(), sizeof(text) - std::strlen(text) - 1);
+    if (current.signal_to_noise_db) {
+        if (current.signal_below_noise) std::snprintf(text, sizeof(text), "SNR <0 dB");
+        else std::snprintf(text, sizeof(text), "SNR ~%.0f dB", *current.signal_to_noise_db);
     } else {
-        std::snprintf(text, sizeof(text), "S --");
+        std::snprintf(text, sizeof(text), "SNR --");
     }
     if (std::strcmp(signal_level_subject_.value(), text) != 0) signal_level_subject_.set(text);
     publish_alert();
@@ -335,7 +304,7 @@ void BaseViewModel::adjust_setting(int direction) {
 int BaseViewModel::cycle_squelch(int direction) {
     model_.cycle_squelch(direction);
     publish_all();
-    return model_.squelch();
+    return model_.squelch_threshold_db();
 }
 
 void BaseViewModel::publish_settings() {
@@ -354,10 +323,10 @@ void BaseViewModel::publish_settings() {
         format_hz(model_.filter_bandwidth_hz(), values[2], sizeof(values[2]));
     }
     format_hz(model_.tuning_step_hz(), values[3], sizeof(values[3]));
-    if (model_.squelch() == 0) {
+    if (model_.squelch_threshold_db() == 0) {
         std::snprintf(values[4], sizeof(values[4]), "Off");
     } else {
-        std::snprintf(values[4], sizeof(values[4]), "S%d", model_.squelch());
+        std::snprintf(values[4], sizeof(values[4]), "%d dB", model_.squelch_threshold_db());
     }
     for (int i = 0; i < model::BaseModel::kSettingRows; ++i) {
         char title[24]{};

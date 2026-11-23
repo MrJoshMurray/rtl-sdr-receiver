@@ -11,7 +11,9 @@
 #include "iq_types.h"
 #include "radio_settings_adapter.h"
 #include "receive_audio_pipeline.h"
+#include "signal_noise_estimator.h"
 #include "spectrum_simulator.h"
+#include "squelch.h"
 
 #include <liquid/liquid.h>
 
@@ -176,14 +178,16 @@ void RtlReceiver::run() {
     uint32_t last_bw = 0;
     size_t fade_in = 0;
     int settle_chunks = 0;
-    double noise_floor_db = 0.0;
-    bool noise_floor_valid = false;
+    SignalNoiseEstimator signal_noise;
+    int meter_mode = -1;
+    uint32_t meter_bandwidth = 0;
+    uint64_t meter_target = 0;
+    uint64_t meter_generation = 0;
+    int meter_offset = 0;
     bool squelch_open = true;
     float gate = 1.0f;
     float deemph = 0.0f;
     auto last_publish = std::chrono::steady_clock::now();
-    double level_sum = 0.0;
-    size_t level_count = 0;
 
     // Reading in its own thread keeps USB transfers back to back while the
     // worker processes, otherwise the dongle overruns and audio underruns.
@@ -296,7 +300,6 @@ void RtlReceiver::run() {
                 freqdem_reset(wfm_demod);
                 deemph = 0.0f;
                 fade_in = kDefaultRxSampleRateHz / 200;
-                noise_floor_valid = false;
             }
             tuned_hz = chunk.target_hz;
             tuned_offset = effective_offset;
@@ -313,6 +316,18 @@ void RtlReceiver::run() {
         if (tuned_offset != 0) nco_crcf_mix_block_down(shifter, input.data(), input.data(), static_cast<unsigned>(count));
 
         const bool wfm = mode == model::RadioMode::Wfm;
+        if (meter_mode != static_cast<int>(mode) || meter_bandwidth != bandwidth
+            || meter_target != target || meter_generation != chunk.generation
+            || meter_offset != tuned_offset) {
+            meter_mode = static_cast<int>(mode);
+            meter_bandwidth = bandwidth;
+            meter_target = target;
+            meter_generation = chunk.generation;
+            meter_offset = tuned_offset;
+            signal_noise.reset(wfm ? kCaptureRateHz : kDefaultRxSampleRateHz,
+                               bandwidth, mode, wfm ? tuned_offset : 0);
+            squelch_open = squelch_threshold_db_.load() == 0;
+        }
         unsigned mid_count = 0;
         msresamp_crcf_execute(decim, input.data(), static_cast<unsigned>(count), mid_iq.data(), &mid_count);
         if (mid_count == 0) continue;
@@ -343,11 +358,13 @@ void RtlReceiver::run() {
 
         pipeline_iq.resize(produced);
         for (unsigned i = 0; i < produced; ++i) {
-            level_sum += channel[i].real * channel[i].real + channel[i].imag * channel[i].imag;
             pipeline_iq[i] = {static_cast<int32_t>(channel[i].real * 8388607.0f),
                               static_cast<int32_t>(channel[i].imag * 8388607.0f)};
         }
-        level_count += produced;
+        if (!settling && digital_offset) {
+            if (wfm) signal_noise.push(spectrum_iq.data(), spectrum_iq.size());
+            else signal_noise.push(pipeline_iq.data(), pipeline_iq.size());
+        }
 
         if (mode == model::RadioMode::Wfm || mode == model::RadioMode::Nfm) {
             std::vector<float>* audio = &fm_audio;
@@ -398,29 +415,14 @@ void RtlReceiver::run() {
         }
 
         const auto now = std::chrono::steady_clock::now();
-        if (now - last_publish >= std::chrono::milliseconds(100) && level_count > 0) {
+        if (now - last_publish >= std::chrono::milliseconds(100)) {
             model::RadioMeasurements next;
-            const double rms = std::sqrt(level_sum / level_count);
-            // The dongle's AGC keeps absolute level near-constant, so report the level
-            // above a tracked noise floor (drops fast, creeps up slowly), 3 dB per S unit.
-            const double level_db = 20.0 * std::log10(std::max(rms, 1e-6));
-            if (!noise_floor_valid || level_db < noise_floor_db) {
-                noise_floor_db = level_db;
-                noise_floor_valid = true;
-            } else {
-                noise_floor_db += 0.05;
+            const auto estimate = signal_noise.estimate();
+            squelch_open = squelch_is_open(squelch_open, squelch_threshold_db_.load(), estimate);
+            if (estimate) {
+                next.signal_to_noise_db = estimate->db;
+                next.signal_below_noise = estimate->below_noise;
             }
-            const int squelch_level = squelch_.load();
-            const double above_floor_db = level_db - noise_floor_db;
-            const double threshold_db = 3.0 * squelch_level;
-            if (squelch_level == 0) squelch_open = true;
-            else if (above_floor_db >= threshold_db) squelch_open = true;
-            else if (above_floor_db < threshold_db - 1.5) squelch_open = false;
-            constexpr double kS9AboveFloorDb = 27.0;
-            next.signal_level_dbfs = static_cast<int>(std::lround(
-                model::kS9ReferenceDbfs + (level_db - noise_floor_db) - kS9AboveFloorDb));
-            level_sum = 0.0;
-            level_count = 0;
             last_publish = now;
             std::lock_guard<std::mutex> lock(measurements_mutex_);
             measurements_ = next;

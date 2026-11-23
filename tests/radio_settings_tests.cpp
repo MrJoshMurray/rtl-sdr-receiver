@@ -14,6 +14,16 @@ int main() {
     assert(model.frequency_hz() == 98000000);
     assert(model.radio_mode() == model::RadioMode::Wfm);
     assert(std::string(model.band_name()) == "FM");
+    assert(model.squelch_threshold_db() == 0);
+    for (int threshold = 3; threshold <= 27; threshold += 3) {
+        model.cycle_squelch(1);
+        assert(model.squelch_threshold_db() == threshold);
+    }
+    model.cycle_squelch(1);
+    assert(model.squelch_threshold_db() == 0);
+    model.cycle_squelch(-1);
+    assert(model.squelch_threshold_db() == 27);
+    model.cycle_squelch(1);
 
     model.cycle_band(1);
     assert(model.frequency_hz() > 98000000);
