@@ -1,11 +1,11 @@
 {
   "app_name": "RTL SDR",
   "package_name": "rtl-sdr-receiver",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Receive-only radio for Cardputer Zero using an RTL-SDR USB dongle.",
   "store": {
     "summary": "Listen to FM, airband, shortwave and ham radio with an RTL-SDR dongle.",
-    "description": "RTL SDR turns your Cardputer Zero into a pocket radio receiver. You'll need an RTL-SDR USB dongle (plugged into the USB port) and an antenna, as the Cardputer can't pick up radio on its own. It only receives, it never transmits.\n\nTune broadcast FM, AM and shortwave, airband and military airband, marine and ham bands from 2 m to 23 cm, and anything else from 0.1 MHz to 1.7 GHz. Pick a band, mode (FMW, FMN, AM, USB, LSB, CW), filter width and step, or type an exact frequency. There's a live spectrum and waterfall, an S meter, squelch, an auto notch to zap whistles, and RIT. Press H any time for a key guide.",
+    "description": "RTL SDR turns your Cardputer Zero into a pocket radio receiver. You'll need an RTL-SDR USB dongle (plugged into the USB port) and an antenna, as the Cardputer can't pick up radio on its own. It only receives, it never transmits. Confirmed working with the RTL-SDR Blog V3 and Nooelec NESDR SMArt v5.\n\nTune broadcast FM, AM and shortwave, airband and military airband, marine and ham bands from 2 m to 23 cm, and anything else from 0.1 MHz to 1.7 GHz. Pick a band, mode (FMW, FMN, AM, USB, LSB, CW), filter width and step, or type an exact frequency. There's a live spectrum and waterfall, an S meter, squelch, an auto notch to zap whistles, and RIT. Press H any time for a key guide.",
     "locales": {
       "ja": {
         "summary": "RTL-SDR ドングルで FM、航空無線、短波、アマチュア無線を受信。",

@@ -136,6 +136,7 @@ void RtlReceiver::run() {
         if (!audio_ready) std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
     if (!audio_ready) {
+        if (running_.load()) std::fprintf(stderr, "RTL-SDR audio output failed: %s\n", error.c_str());
         api.close(dev);
         discovery_state_.store(static_cast<int>(model::RadioDiscoveryState::Error));
         running_.store(false);

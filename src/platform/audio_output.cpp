@@ -19,6 +19,24 @@
 #endif
 
 namespace platform::audio {
+
+bool detail::open_output_candidates(const std::string& device_id,
+                                    const std::function<bool(const char*, std::string&)>& open,
+                                    std::string& error) {
+    error.clear();
+    const char* first = device_id.empty() ? "default" : device_id.c_str();
+    std::string first_error;
+    if (open(first, first_error)) return true;
+    if (!device_id.empty()) {
+        error = first_error;
+        return false;
+    }
+    std::string pulse_error;
+    if (open("pulse", pulse_error)) return true;
+    error = first_error + "; " + pulse_error;
+    return false;
+}
+
 namespace {
 
 constexpr size_t kMaxFramesPerWrite = 4096;
@@ -328,23 +346,29 @@ bool AudioOutput::open(const std::string& device_id, uint32_t sample_rate, std::
     return true;
 #elif RTL_SDR_HAS_ALSA
     snd_pcm_t* pcm = nullptr;
-    const char* name = device_id.empty() ? "default" : device_id.c_str();
-    int result = snd_pcm_open(&pcm, name, SND_PCM_STREAM_PLAYBACK, 0);
-    if (result < 0) {
-        error = snd_strerror(result);
-        return false;
-    }
-
-    result = snd_pcm_set_params(pcm,
-                                SND_PCM_FORMAT_S16_LE,
-                                SND_PCM_ACCESS_RW_INTERLEAVED,
-                                2,
-                                sample_rate,
-                                1,
-                                500000);
-    if (result < 0) {
-        error = snd_strerror(result);
-        snd_pcm_close(pcm);
+    auto try_open = [&](const char* name, std::string& attempt_error) {
+        pcm = nullptr;
+        int result = snd_pcm_open(&pcm, name, SND_PCM_STREAM_PLAYBACK, 0);
+        if (result < 0) {
+            attempt_error = std::string(name) + " open " + std::to_string(result) + ": " + snd_strerror(result);
+            return false;
+        }
+        result = snd_pcm_set_params(pcm,
+                                    SND_PCM_FORMAT_S16_LE,
+                                    SND_PCM_ACCESS_RW_INTERLEAVED,
+                                    2,
+                                    sample_rate,
+                                    1,
+                                    500000);
+        if (result < 0) {
+            attempt_error = std::string(name) + " set_params " + std::to_string(result) + ": " + snd_strerror(result);
+            snd_pcm_close(pcm);
+            pcm = nullptr;
+            return false;
+        }
+        return true;
+    };
+    if (!detail::open_output_candidates(device_id, try_open, error)) {
         return false;
     }
 

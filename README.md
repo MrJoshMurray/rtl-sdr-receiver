@@ -5,6 +5,8 @@ A pocket radio receiver for the **Cardputer Zero**, using an **RTL-SDR USB dongl
 Tune from 0.1 MHz to about 1.7 GHz: broadcast FM, AM and shortwave, airband, military airband, marine, and the 2 m, 70 cm and 23 cm ham bands. You get a live spectrum and waterfall, a relative S meter, squelch, an auto notch and RIT.
 
 Plug the dongle into the USB-A port and connect an antenna. The package installs a udev rule so no root is needed.
+Reception has been confirmed with the RTL-SDR Blog V3 and Nooelec NESDR SMArt v5.
+On the device, audio uses the default ALSA output and falls back to PulseAudio if it cannot be opened or configured.
 
 Small tuning changes use digital tuning within the current capture window. In FMW, the
 waterfall's unavailable outer edge is blank until the hardware tuner recenters.

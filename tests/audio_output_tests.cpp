@@ -15,6 +15,46 @@
 #include <vector>
 
 int main() {
+    using platform::audio::detail::open_output_candidates;
+    std::vector<std::string> attempts;
+    std::string candidate_error;
+    auto default_success = [&](const char* name, std::string&) {
+        attempts.emplace_back(name);
+        return true;
+    };
+    assert(open_output_candidates("", default_success, candidate_error));
+    assert((attempts == std::vector<std::string>{"default"}));
+    assert(candidate_error.empty());
+
+    attempts.clear();
+    auto pulse_success = [&](const char* name, std::string& error) {
+        attempts.emplace_back(name);
+        if (std::string(name) == "pulse") return true;
+        error = "default setup -524";
+        return false;
+    };
+    assert(open_output_candidates("", pulse_success, candidate_error));
+    assert((attempts == std::vector<std::string>{"default", "pulse"}));
+    assert(candidate_error.empty());
+
+    attempts.clear();
+    auto both_fail = [&](const char* name, std::string& error) {
+        attempts.emplace_back(name);
+        error = std::string(name) + " error";
+        return false;
+    };
+    assert(!open_output_candidates("", both_fail, candidate_error));
+    assert((attempts == std::vector<std::string>{"default", "pulse"}));
+    assert(candidate_error == "default error; pulse error");
+
+    attempts.clear();
+    assert(!open_output_candidates("custom", both_fail, candidate_error));
+    assert((attempts == std::vector<std::string>{"custom"}));
+    assert(candidate_error == "custom error");
+    attempts.clear();
+    assert(!open_output_candidates("default", both_fail, candidate_error));
+    assert((attempts == std::vector<std::string>{"default"}));
+
     platform::audio::BandEdgeTone tone;
     assert(tone.next_sample(123, 48000) == 123);
     tone.request();

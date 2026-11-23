@@ -27,6 +27,12 @@ struct OutputDevice {
 
 bool enumerate_output_devices(std::vector<OutputDevice>& devices, std::string& error);
 
+namespace detail {
+bool open_output_candidates(const std::string& device_id,
+                            const std::function<bool(const char*, std::string&)>& open,
+                            std::string& error);
+}
+
 enum class VolumeAction {
     Down,
     Up,
